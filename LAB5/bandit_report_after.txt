@@ -1,4 +1,9 @@
-Run started:2026-10-14 18:09:47.489468+00:00
+[main]	INFO	profile include tests: None
+[main]	INFO	profile exclude tests: None
+[main]	INFO	cli include tests: None
+[main]	INFO	cli exclude tests: None
+[main]	INFO	running on Python 3.13.7
+Run started:2026-10-14 18:32:59.942257+00:00
 
 Test results:
 	No issues identified.
