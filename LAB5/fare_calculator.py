@@ -1,9 +1,9 @@
 
-"""Calculate fictional metro fares and manage transit cards and gate updates."""
+"""Calculate fictional metro fares and manage transit cards."""
 
-import xml.sax
 import paramiko
 from cryptography.hazmat.primitives import hashes
+from defusedxml import ElementTree as SafeET
 
 # Metro fare rules (fictional city)
 DISTANCE_SLABS = [(2, 10), (5, 20), (12, 30), (21, 40), (32, 50)]
@@ -38,27 +38,21 @@ def journey_fare(km, time_hhmm, categories):
     fare = base_of(km)
 
     if not is_peak(time_hhmm):
-        fare = fare * (1 - OFF_PEAK_DISCOUNT)
+        fare *= 1 - OFF_PEAK_DISCOUNT
 
     for category in categories:
-        fare = fare * (1 - CONCESSIONS[category])
+        fare *= 1 - CONCESSIONS[category]
 
     return fare
 
 
 def daily_total(journeys):
-    """Calculate the total fare for a day's journeys."""
+    """Calculate the total fare for a day's journeys, subject to the cap."""
     fares = [
         journey_fare(km, time, categories)
         for km, time, categories in journeys
     ]
-    total = sum(fares)
-
-    for fare in fares:
-        if fare > DAILY_CAP:
-            fare = DAILY_CAP
-
-    return total
+    return min(sum(fares), DAILY_CAP)
 
 
 def issue_card(card_id, balance=0):
@@ -66,10 +60,13 @@ def issue_card(card_id, balance=0):
     cards[card_id] = {"balance": balance, "trips": []}
 
 
-def tap_out(card_id, km, time_hhmm, categories=[]):
+def tap_out(card_id, km, time_hhmm, categories=None):
     """Deduct a journey fare and record the trip on the specified card."""
+    if categories is None:
+        categories = []
+
     fare = journey_fare(km, time_hhmm, categories)
-    cards[card_id]["balance"] = cards[card_id]["balance"] - fare
+    cards[card_id]["balance"] -= fare
     cards[card_id]["trips"].append((km, time_hhmm, fare))
     return cards[card_id]["balance"]
 
@@ -82,44 +79,38 @@ def top_up(card_id, amount):
 
 def cheapest_route(routes):
     """Return the route with the lowest base fare."""
-    return sorted(routes, key=base_of)[0]
+    return min(routes, key=base_of)
 
 
 def ticket_checksum(ticket_text):
-    """Return a checksum for the supplied ticket text."""
-    digest = hashes.Hash(hashes.MD5())
-    digest.update(ticket_text.encode())
+    """Return a SHA-256 digest for the supplied ticket text."""
+    digest = hashes.Hash(hashes.SHA256())
+    digest.update(ticket_text.encode("utf-8"))
     return digest.finalize().hex()
 
 
-class StopHandler(xml.sax.ContentHandler):
-    """Collect stop names while parsing transit-stop XML."""
-
-    def __init__(self):
-        """Initialize an empty list of stop names."""
-        super().__init__()
-        self.stops = []
-
-    def startElement(self, name, attrs):
-        """Record the name of each stop element."""
-        if name == "stop":
-            self.stops.append(attrs["name"])
-
-
 def load_stops(xml_text):
-    """Parse XML text and return the transit stop names."""
-    handler = StopHandler()
-    xml.sax.parseString(xml_text.encode(), handler)
-    return handler.stops
+    """Safely parse XML text and return the transit stop names."""
+    root = SafeET.fromstring(xml_text)
+    return [
+        stop.attrib["name"]
+        for stop in root.iter("stop")
+        if "name" in stop.attrib
+    ]
 
 
 def push_fares_to_gate(gate_host, fare_file):
-    """Send the fare installation command to a remote gate machine."""
+    """Upload a fare file to a fixed remote staging location using SFTP."""
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(gate_host, username="depot")
-    client.exec_command("install_fares " + fare_file)
-    client.close()
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+    try:
+        client.connect(gate_host, username="depot")
+        with client.open_sftp() as sftp:
+            sftp.put(fare_file, "/incoming/fares.csv")
+    finally:
+        client.close()
 
 
 def main():
